@@ -16,6 +16,8 @@
 package com.github.javahello.proxy.core;
 
 import com.github.javahello.proxy.conf.ProxyConf;
+import com.github.javahello.proxy.conf.UpstreamServer;
+import com.github.javahello.proxy.util.ProxyClientHelper;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.*;
@@ -27,7 +29,10 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 public class ProxyServer implements Closeable {
     final EventLoopGroup bossGroup;
@@ -37,6 +42,74 @@ public class ProxyServer implements Closeable {
 
     private Channel sc;
     private ProxyConf.Server serverConf;
+    private ProxyContext proxyContext;
+
+    private List<UrlMatch> urlMatches = new ArrayList<>();
+
+    class UrlMatch implements Comparable<UrlMatch> {
+        private String api;
+        private ProxyConf.Location location;
+        private String hostname;
+
+        @Override
+        public int compareTo(UrlMatch o) {
+            String c2 = Optional.ofNullable(o)
+                    .map(UrlMatch::getApi)
+                    .orElse(null);
+            if (c2 == null) {
+                return -1;
+            }
+            if (this.api == null) {
+                return 0;
+            }
+            if (this.api.length() > c2.length()) {
+                return 1;
+            }
+            return 0;
+        }
+
+        public boolean match(String uri) {
+            return Optional.ofNullable(uri)
+                    .map(e -> e.split("/"))
+                    .map(e -> {
+                        if (e.length == 0) {
+                            return "/";
+                        }
+                        String r = "/";
+                        if (e.length > 1) {
+                            r += e[1];
+                        } else {
+                            r += e[0];
+                        }
+                        return r;
+                    })
+                    .map(e -> e.equalsIgnoreCase(api)).orElse(false);
+        }
+
+        public String getApi() {
+            return api;
+        }
+
+        public void setApi(String api) {
+            this.api = api;
+        }
+
+        public ProxyConf.Location getLocation() {
+            return location;
+        }
+
+        public void setLocation(ProxyConf.Location location) {
+            this.location = location;
+        }
+
+        public String getHostname() {
+            return hostname;
+        }
+
+        public void setHostname(String hostname) {
+            this.hostname = hostname;
+        }
+    }
 
     public ProxyServer() {
         bossGroup = new NioEventLoopGroup();
@@ -44,14 +117,34 @@ public class ProxyServer implements Closeable {
         serverBootstrap.group(bossGroup, workerGroup).channel(NioServerSocketChannel.class);
     }
 
-    public void initProxyCline() {
-
+    public void initProxyCline() throws MalformedURLException {
+        for (Map.Entry<String, ProxyConf.Location> locationEntry : serverConf.getLocation().entrySet()) {
+            UrlMatch urlMatch = new UrlMatch();
+            urlMatch.setApi(locationEntry.getKey());
+            urlMatch.setLocation(locationEntry.getValue());
+            URL url = new URL(urlMatch.getLocation().getProxyPass());
+            if (proxyContext.hasUpstream(url.getHost())) {
+                urlMatch.setHostname(url.getHost());
+            } else {
+                UpstreamServer upstreamServer = ProxyClientHelper.urlToUps(url);
+                urlMatch.setHostname(upstreamServer.toKey());
+            }
+            urlMatches.add(urlMatch);
+        }
+        urlMatches.sort(UrlMatch::compareTo);
     }
+
+    public Optional<UrlMatch> urlMatch(String uri) {
+        return urlMatches.stream().filter(e -> e.match(uri)).findFirst();
+    }
+
 
     public static ProxyServer create(ProxyConf.Server serverConf, ProxyContext proxyContext) throws MalformedURLException {
         ProxyServer proxyServer = new ProxyServer();
         proxyServer.serverConf = serverConf;
-
+        proxyServer.proxyContext = proxyContext;
+        proxyServer.initProxyCline();
+        ProxyClient proxyClient = ProxyClient.create(proxyServer.clinetBootstrap, proxyServer.workerGroup);
         proxyServer.serverBootstrap
                 .childHandler(new ChannelInitializer<Channel>() {
                     @Override
@@ -67,62 +160,30 @@ public class ProxyServer implements Closeable {
                         cp.addLast("http-content-compressor", new HttpContentCompressor());
 
                         cp.addLast("http-proxy", new SimpleChannelInboundHandler<FullHttpRequest>() {
-
-                            private final Map<String, List<ProxyClient>> clientMap = new HashMap<>();
-
-                            @Override
-                            public void channelActive(ChannelHandlerContext ctx) throws Exception {
-                                Channel sc = ctx.channel();
-                                for (Map.Entry<String, ProxyConf.Location> locationEntry : serverConf.getLocation().entrySet()) {
-                                    String key = locationEntry.getKey();
-                                    ProxyConf.Location value = locationEntry.getValue();
-                                    String proxyPass = value.getProxyPass();
-                                    URL url = new URL(proxyPass);
-                                    Optional<List<String>> upstream = proxyContext.findUpstream(url.getHost());
-                                    upstream.ifPresentOrElse(e -> {
-                                        clientMap.put(key, ProxyClientHelper.createClients(e, sc, url.getPath()));
-                                    }, () -> {
-                                        int port = 80;
-                                        if (url.getPort() > 1) {
-                                            port = url.getPort();
-                                        }
-                                        ProxyClient proxyClient = ProxyClient.create(sc, url.getHost(), port, url.getPath());
-                                        clientMap.put(key, Arrays.asList(proxyClient));
-                                    });
-                                }
-                            }
-
                             @Override
                             public void channelRead0(ChannelHandlerContext ctx, FullHttpRequest msg) throws Exception {
-
+                                Channel sc = ctx.channel();
                                 String uri = msg.uri();
                                 String reqPath = "";
-                                Optional.ofNullable(clientMap.get(uri))
-                                        .ifPresentOrElse(e -> {
-                                            ProxyClient proxyClient = e.get(0);
-                                            DefaultFullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, proxyClient.path(reqPath), msg.content().copy());
+                                proxyServer.urlMatch(uri)
+                                        .flatMap(e -> proxyContext.findClientUps(e.getHostname()))
+                                        .map(ups -> proxyClient.createHttpClient(sc, ups))
+                                        .ifPresentOrElse(httpClient -> {
+                                            DefaultFullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, uri, msg.content().copy());
                                             for (Map.Entry<String, String> header : msg.headers()) {
                                                 if (HttpHeaderNames.HOST.contentEqualsIgnoreCase(header.getKey())) {
                                                     continue;
                                                 }
                                                 request.headers().add(header.getKey(), header.getValue());
                                             }
-                                            request.headers().add(HttpHeaderNames.HOST, proxyClient.address);
-                                            proxyClient.writeAndFlush(request);
+                                            request.headers().add(HttpHeaderNames.HOST, httpClient.getHost());
+
+                                            httpClient.writeAndFlush(request);
                                         }, () -> {
                                             DefaultFullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.NOT_FOUND);
                                             response.headers().add(HttpHeaderNames.CONTENT_LENGTH, 0);
                                             ctx.writeAndFlush(response);
                                         });
-                            }
-
-                            @Override
-                            public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-                                for (Map.Entry<String, List<ProxyClient>> clientEntry : clientMap.entrySet()) {
-                                    for (ProxyClient client : clientEntry.getValue()) {
-                                        client.close();
-                                    }
-                                }
                             }
                         });
                     }

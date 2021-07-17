@@ -13,27 +13,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.github.javahello.proxy.core;
+package com.github.javahello.proxy.util;
 
-import io.netty.channel.Channel;
+import com.github.javahello.proxy.conf.UpstreamServer;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.net.URL;
 
 /**
  * @author kailuo
  */
 public class ProxyClientHelper {
-    public static List<ProxyClient> createClients(List<String> server, Channel sc, String path) {
-        List<ProxyClient> proxyClients = new ArrayList<>();
-        for (String s : server) {
-            String[] ss = s.split(":");
-            int port = 80;
-            if (ss.length == 2) {
-                port = Integer.parseInt(ss[1]);
-            }
-            proxyClients.add(ProxyClient.create(sc, ss[0], port, path));
+    public static UpstreamServer urlToUps(URL url) {
+        UpstreamServer upstreamServer = new UpstreamServer();
+        upstreamServer.setAddress(url.getHost());
+        int port = 80;
+        if (url.getPort() > 0) {
+            port = url.getPort();
         }
-        return proxyClients;
+        upstreamServer.setPort(port);
+        return upstreamServer;
     }
 }
