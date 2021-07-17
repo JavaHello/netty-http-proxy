@@ -127,14 +127,9 @@ public class ProxyClient {
                             @Override
                             public void channelInactive(ChannelHandlerContext ctx) throws Exception {
                                 proxyClient.serverMap.remove(ctx.channel().id());
-                                ctx.fireChannelInactive();
+                                super.channelInactive(ctx);
                             }
 
-                            @Override
-                            public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-                                proxyClient.serverMap.remove(ctx.channel().id());
-                                ctx.fireExceptionCaught(cause);
-                            }
                         });
                     }
                 });
@@ -150,14 +145,15 @@ public class ProxyClient {
             HttpClient httpClient = new HttpClient();
             httpClient.sc = sc;
             httpClient.upstreamServer = upstreamServer;
-            httpClient.channelFuture = connect(upstreamServer).addListener((ChannelFutureListener) future -> {
-                if (future.isSuccess()) {
-                    httpClient.ch = future.channel();
-                    serverMap.put(future.channel().id(), httpClient);
-                } else {
-                    future.cause().printStackTrace();
-                }
-            });
+            httpClient.channelFuture = connect(upstreamServer)
+                    .addListener((ChannelFutureListener) future -> {
+                        if (future.isSuccess()) {
+                            httpClient.ch = future.channel();
+                            serverMap.put(future.channel().id(), httpClient);
+                        } else {
+                            future.cause().printStackTrace();
+                        }
+                    });
             return httpClient;
         });
     }

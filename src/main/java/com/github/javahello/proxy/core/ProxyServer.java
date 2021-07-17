@@ -29,7 +29,6 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -39,15 +38,14 @@ public class ProxyServer implements Closeable {
     final EventLoopGroup bossGroup;
     final EventLoopGroup workerGroup;
     final ServerBootstrap serverBootstrap = new ServerBootstrap();
-    final Bootstrap clinetBootstrap = new Bootstrap();
+    final Bootstrap clientBootstrap = new Bootstrap();
 
-    private Channel sc;
     private ProxyConf.Server serverConf;
     private ProxyContext proxyContext;
 
-    private List<UrlMatch> urlMatches = new ArrayList<>();
+    private final List<UrlMatch> urlMatches = new ArrayList<>();
 
-    class UrlMatch implements Comparable<UrlMatch> {
+    static class UrlMatch implements Comparable<UrlMatch> {
         private String api;
         private ProxyConf.Location location;
         private String hostname;
@@ -145,7 +143,7 @@ public class ProxyServer implements Closeable {
         proxyServer.serverConf = serverConf;
         proxyServer.proxyContext = proxyContext;
         proxyServer.initProxyCline();
-        ProxyClient proxyClient = ProxyClient.create(proxyServer.clinetBootstrap, proxyServer.workerGroup);
+        ProxyClient proxyClient = ProxyClient.create(proxyServer.clientBootstrap, proxyServer.workerGroup);
         proxyServer.serverBootstrap
                 .childHandler(new ChannelInitializer<Channel>() {
                     @Override
@@ -158,31 +156,33 @@ public class ProxyServer implements Closeable {
                         // 压缩内容
                         cp.addLast("http-content-compressor", new HttpContentCompressor());
 
-                        cp.addLast("http-proxy", new SimpleChannelInboundHandler<FullHttpRequest>() {
+                        cp.addLast("http-proxy", new SimpleChannelInboundHandler<FullHttpRequest>(false) {
+                            ProxyClient.HttpClient httpClient;
+
                             @Override
                             public void channelRead0(ChannelHandlerContext ctx, FullHttpRequest msg) throws Exception {
                                 Channel sc = ctx.channel();
                                 String uri = msg.uri();
-                                String reqPath = "";
-                                proxyServer.urlMatch(uri)
-                                        .flatMap(e -> proxyContext.findClientUps(e.getHostname()))
-                                        .map(ups -> proxyClient.createHttpClient(sc, ups))
-                                        .ifPresentOrElse(httpClient -> {
-                                            DefaultFullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, uri, msg.content().copy());
-                                            for (Map.Entry<String, String> header : msg.headers()) {
-                                                if (HttpHeaderNames.HOST.contentEqualsIgnoreCase(header.getKey())) {
-                                                    continue;
-                                                }
-                                                request.headers().add(header.getKey(), header.getValue());
-                                            }
-                                            request.headers().add(HttpHeaderNames.HOST, httpClient.getHost());
-
-                                            httpClient.writeAndFlush(request);
-                                        }, () -> {
-                                            DefaultFullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.NOT_FOUND);
-                                            response.headers().add(HttpHeaderNames.CONTENT_LENGTH, 0);
-                                            ctx.writeAndFlush(response);
-                                        });
+                                if (httpClient == null) {
+                                    httpClient = proxyServer.urlMatch(uri)
+                                            .flatMap(e -> proxyContext.findClientUps(e.getHostname()))
+                                            .map(ups -> proxyClient.createHttpClient(sc, ups)).orElse(null);
+                                    if (httpClient == null) {
+                                        DefaultFullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.NOT_FOUND);
+                                        response.headers().add(HttpHeaderNames.CONTENT_LENGTH, 0);
+                                        ctx.writeAndFlush(response);
+                                        return;
+                                    }
+                                }
+                                DefaultFullHttpRequest request = new DefaultFullHttpRequest(msg.protocolVersion(), msg.method(), uri, msg.content());
+                                for (Map.Entry<String, String> header : msg.headers()) {
+                                    if (HttpHeaderNames.HOST.contentEqualsIgnoreCase(header.getKey())) {
+                                        continue;
+                                    }
+                                    request.headers().add(header.getKey(), header.getValue());
+                                }
+                                request.headers().add(HttpHeaderNames.HOST, httpClient.getHost());
+                                httpClient.writeAndFlush(request);
                             }
 
                             @Override
@@ -197,7 +197,6 @@ public class ProxyServer implements Closeable {
                 .addListener((ChannelFutureListener) future -> {
                     if (future.isSuccess()) {
                         System.out.println(serverConf.getServerName() + ":" + serverConf.getListen() + " 启动成功");
-                        proxyServer.sc = future.channel();
                     } else {
                         throw new RuntimeException(future.cause());
                     }
@@ -207,8 +206,6 @@ public class ProxyServer implements Closeable {
 
     @Override
     public void close() throws IOException {
-        if (sc != null)
-            sc.close();
         bossGroup.shutdownGracefully();
         workerGroup.shutdownGracefully();
     }
