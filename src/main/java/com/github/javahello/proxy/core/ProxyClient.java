@@ -16,7 +16,6 @@
 package com.github.javahello.proxy.core;
 
 import com.github.javahello.proxy.conf.UpstreamServer;
-import com.github.javahello.proxy.util.ClassPathHelper;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.*;
 import io.netty.channel.socket.nio.NioSocketChannel;
@@ -25,102 +24,40 @@ import io.netty.handler.codec.http.HttpContentDecompressor;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 
 import java.net.InetSocketAddress;
-import java.util.HashMap;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 
 public class ProxyClient {
     static int maxContentLength = 1024 * 1024;
     Bootstrap clientBootstrap;
+    final Map<ChannelId, HttpClient> serverMap = new ConcurrentHashMap<>();
+    final Map<ChannelId, HttpClient> clientMap = new ConcurrentHashMap<>();
 
     private ProxyClient() {
     }
 
 
-    class ProxyPass {
-        Channel sc;
-        HttpClient httpClient;
-        Pass pass;
-
-        public void flush(ChannelHandlerContext ctx) {
-            pass.flush(ctx);
-        }
-
-        public void write(ChannelHandlerContext ctx, Object msg) {
-            pass.write(ctx, msg);
-        }
-
-        public void close(ChannelHandlerContext ctx) {
-            pass.close(ctx);
-        }
-    }
-
     interface Pass {
         ChannelFuture write(ChannelHandlerContext ctx, Object msg);
 
         Channel flush(ChannelHandlerContext ctx);
-
-        void close(ChannelHandlerContext ctx);
     }
 
-    Map<ChannelId, ProxyPass> serverChMap = new ConcurrentHashMap<>();
-
-    public void registerPass(Channel sc, HttpClient httpClient) {
-        ProxyPass proxyPass = new ProxyPass();
-        proxyPass.sc = sc;
-        proxyPass.httpClient = httpClient;
-        Optional.ofNullable(httpClient.ch).ifPresentOrElse(ch -> {
-            createPass(sc, httpClient, proxyPass);
-            serverChMap.put(ch.id(), proxyPass);
-        }, () -> {
-            httpClient.channelFuture.addListener((ChannelFutureListener) e -> {
-                if (e.isSuccess()) {
-                    createPass(sc, httpClient, proxyPass);
-                    serverChMap.put(e.channel().id(), proxyPass);
-                }
-            });
-        });
-    }
-
-    private void createPass(Channel sc, HttpClient httpClient, ProxyPass proxyPass) {
-        proxyPass.pass = new Pass() {
-            @Override
-            public ChannelFuture write(ChannelHandlerContext ctx, Object msg) {
-                return sc.write(msg);
-            }
-
-            @Override
-            public Channel flush(ChannelHandlerContext ctx) {
-                return sc.flush();
-            }
-
-            @Override
-            public void close(ChannelHandlerContext ctx) {
-                serverChMap.remove(ctx.channel().id());
-                httpClient.close();
-            }
-        };
-    }
 
     private void flush(ChannelHandlerContext ctx) {
-        serverChMap.get(ctx.channel().id()).flush(ctx);
+        serverMap.get(ctx.channel().id()).flush(ctx);
     }
 
     private void write(ChannelHandlerContext ctx, Object msg) {
-        serverChMap.get(ctx.channel().id()).write(ctx, msg);
-    }
-
-    private void close(ChannelHandlerContext ctx) {
-        serverChMap.get(ctx.channel().id()).close(ctx);
+        serverMap.get(ctx.channel().id()).write(ctx, msg);
     }
 
 
-    class HttpClient {
+    static class HttpClient implements Pass {
         public ChannelFuture channelFuture;
         UpstreamServer upstreamServer;
         private Channel ch;
+        private Channel sc;
 
         private HttpClient() {
         }
@@ -143,13 +80,20 @@ public class ProxyClient {
             return upstreamServer.getPrefix();
         }
 
-        public void close() {
-            Optional.ofNullable(ch).map(Channel::close);
-        }
-
         public String getHost() {
             return upstreamServer.getAddress();
         }
+
+        @Override
+        public ChannelFuture write(ChannelHandlerContext ctx, Object msg) {
+            return sc.write(msg);
+        }
+
+        @Override
+        public Channel flush(ChannelHandlerContext ctx) {
+            return sc.flush();
+        }
+
     }
 
     public static ProxyClient create(Bootstrap clientBootstrap, EventLoopGroup eventLoopGroup) {
@@ -179,9 +123,17 @@ public class ProxyClient {
                                 proxyClient.flush(ctx);
                             }
 
+
                             @Override
                             public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-                                proxyClient.close(ctx);
+                                proxyClient.serverMap.remove(ctx.channel().id());
+                                ctx.fireChannelInactive();
+                            }
+
+                            @Override
+                            public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+                                proxyClient.serverMap.remove(ctx.channel().id());
+                                ctx.fireExceptionCaught(cause);
                             }
                         });
                     }
@@ -194,17 +146,24 @@ public class ProxyClient {
     }
 
     public HttpClient createHttpClient(Channel sc, UpstreamServer upstreamServer) {
-        HttpClient httpClient = new HttpClient();
-        httpClient.upstreamServer = upstreamServer;
-        httpClient.channelFuture = connect(upstreamServer).addListener((ChannelFutureListener) future -> {
-            if (future.isSuccess()) {
-                httpClient.ch = future.channel();
-            } else {
-                future.cause().printStackTrace();
-            }
+        return clientMap.computeIfAbsent(sc.id(), k -> {
+            HttpClient httpClient = new HttpClient();
+            httpClient.sc = sc;
+            httpClient.upstreamServer = upstreamServer;
+            httpClient.channelFuture = connect(upstreamServer).addListener((ChannelFutureListener) future -> {
+                if (future.isSuccess()) {
+                    httpClient.ch = future.channel();
+                    serverMap.put(future.channel().id(), httpClient);
+                } else {
+                    future.cause().printStackTrace();
+                }
+            });
+            return httpClient;
         });
-        registerPass(sc, httpClient);
-        return httpClient;
+    }
+
+    public void close(ChannelHandlerContext ctx) {
+        clientMap.remove(ctx.channel().id());
     }
 
 

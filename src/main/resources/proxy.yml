@@ -2,7 +2,7 @@
 upstream:
   proxy_001:
     server:
-      - "localhost:80"
+      - "localhost:9000"
 servers:
   - listen: 8080
     serverName: "localhost"

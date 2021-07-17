@@ -29,6 +29,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -150,10 +151,8 @@ public class ProxyServer implements Closeable {
                     @Override
                     protected void initChannel(Channel ch) throws Exception {
                         ChannelPipeline cp = ch.pipeline();
-                        //请求解码器
-                        cp.addLast("http-decoder", new HttpRequestDecoder());
-                        // 响应转码器
-                        cp.addLast("http-encoder", new HttpResponseEncoder());
+                        // 请求解码器, 响应转码器
+                        cp.addLast(new HttpServerCodec());
                         // 将HTTP消息的多个部分合成一条完整的HTTP消息，对于报文较长的请求需要设置，短请求可以不设置
                         cp.addLast("http-aggregator", new HttpObjectAggregator(1024 * 1024));
                         // 压缩内容
@@ -184,6 +183,12 @@ public class ProxyServer implements Closeable {
                                             response.headers().add(HttpHeaderNames.CONTENT_LENGTH, 0);
                                             ctx.writeAndFlush(response);
                                         });
+                            }
+
+                            @Override
+                            public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+                                proxyClient.close(ctx);
+                                super.channelInactive(ctx);
                             }
                         });
                     }
