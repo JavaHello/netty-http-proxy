@@ -16,7 +16,7 @@ servers:
     location:
       /api:
         proxyPass: "http://www.baidu.com/api"
-      /local:
+      /:
         proxyPass: "http://www.baidu.com/"
 
 

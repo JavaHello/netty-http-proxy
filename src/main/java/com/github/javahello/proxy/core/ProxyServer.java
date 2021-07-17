@@ -186,6 +186,11 @@ public class ProxyServer implements Closeable {
                             }
 
                             @Override
+                            public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+                                // TODO 客户端异常了
+                            }
+
+                            @Override
                             public void channelInactive(ChannelHandlerContext ctx) throws Exception {
                                 proxyClient.close(ctx);
                                 super.channelInactive(ctx);
