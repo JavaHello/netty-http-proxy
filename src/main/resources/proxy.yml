@@ -1,0 +1,22 @@
+---
+upstream:
+  proxy_001:
+    server:
+      - "www.bilibili.com:80"
+servers:
+  - listen: 8080
+    serverName: "localhost"
+    location:
+      /api:
+        proxyPass: "http://proxy_001/api"
+      /:
+        proxyPass: "http://proxy_001/"
+  - listen: 8081
+    serverName: "localhost"
+    location:
+      /api:
+        proxyPass: "http://www.baidu.com/api"
+      /:
+        proxyPass: "http://www.baidu.com/"
+
+
