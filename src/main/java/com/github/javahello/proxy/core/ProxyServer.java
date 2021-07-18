@@ -187,7 +187,10 @@ public class ProxyServer implements Closeable {
 
                             @Override
                             public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-                                // TODO 客户端异常了
+                                // 客户端异常了 返回 500
+                                DefaultFullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.INTERNAL_SERVER_ERROR);
+                                response.headers().add(HttpHeaderNames.CONTENT_LENGTH, 0);
+                                ctx.writeAndFlush(response);
                             }
 
                             @Override
